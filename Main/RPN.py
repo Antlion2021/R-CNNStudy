@@ -29,6 +29,33 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
                                         kernel_size=1,
                                         stride=1)
 
+    def generate_anchors(self, image, feat):
+        grid_h, grid_w = feat.shape[-2:]
+        image_h, image_w = image.shape[-2:]
+
+        strid_h = torch.tensor(image_h // grid_h,
+                               dtype=torch.int64,
+                               device=feat.device)
+        strid_h = torch.tensor(image_w // grid_w,
+                               dtype=torch.int64,
+                               device=feat.device)
+        scale = torch.totensor(self.scales,
+                               dtype=feat.dtype,
+                               device=feat.device)
+        aspect_ratio = torch.tensor(self.aspect_ratios,
+                                    dtype=feat.dtype,
+                                    device=feat.device)
+        # below code ensure h/w = aspect_ratio, h*w = 1
+        h_ratio = torch.sqrt(aspect_ratio)
+        w_ratio = 1/h_ratio
+        #     [3x1] * [1x3] -> [3x3].view(-1) -> len[9]
+        # Get Box H and W
+        ws = (w_ratio[:, None] * scale[:, None]).view(-1)
+        hs = (h_ratio[:, None] * scale[:, None]).view(-1)
+
+        base_anchor = torch.stack([-ws, -hs, ws, hs], dim=1) / 2
+        base_anchor = base_anchor.round()
+
     def forward(self, image, feat, target):
         # Call RPN Layer
         rpn_feat = nn.ReLU()(self.rpn_conv(feat))
