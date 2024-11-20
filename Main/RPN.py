@@ -5,6 +5,84 @@ import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+def apply_regression_pred_to_anchor_or_proposals(
+        box_transform_pred, anchor_or_proposals
+):
+    r"""
+    :param box_transform_pred: (num_anchors_or_proposals, num_classes, 4)
+    :param anchor_or_proposals:(num_anchors_or_proposals, 4)
+    :return: pre_box: (num_anchors_or_proposals, num_classes, 4)
+    """
+    box_transform_pred = box_transform_pred.reshape(box_transform_pred.size(0), -1, 4)
+
+    # Get cx, cy, w, h, from x1, y1, x2, y2
+    w = anchor_or_proposals[:, 2] - anchor_or_proposals[:, 0]
+    h = anchor_or_proposals[:, 3] - anchor_or_proposals[:, 1]
+    center_x = anchor_or_proposals[:, 0] + 0.5 * w
+    center_y = anchor_or_proposals[:, 1] + 0.5 * h
+
+    # Get Transform param tx , ty, tw, th (dx,dy,dw,dh) in code
+    dx = box_transform_pred[..., 0]
+    dy = box_transform_pred[..., 1]
+    dw = box_transform_pred[..., 2]
+    dh = box_transform_pred[..., 3]
+    # dh -> (num_anchor_or_proposals, num_classes)
+
+    pred_center_x = w[:, None] * dx + center_x[:, None]
+    pred_center_y = h[:, None] * dy + center_y[:, None]
+    pred_w = torch.exp(dw) * w[:, None]
+    pred_h = torch.exp(dh) * h[:, None]
+    # pred_center_x ->(num_anchor_or_proposals, num_class)
+
+    # Get pred_box x1, x2, y1, y2
+    pred_box_x1 = pred_center_x - 0.5 * pred_w
+    pred_box_y1 = pred_center_y - 0.5 * pred_h
+    pred_box_x2 = pred_center_x + 0.5 * pred_w
+    pred_box_y2 = pred_center_y + 0.5 * pred_h
+
+    pred_box = torch.stack([pred_box_x1, pred_box_y1, pred_box_x2, pred_box_y2], dim=2)
+    # pred_box -> (num_of_anchor_or_proposals, num_classes, 4)
+    return pred_box
+
+def clamp_box_to_image(box, image_shape):
+    boxes_x1 = box[..., 0]
+    boxes_y1 = box[..., 1]
+    boxes_x2 = box[..., 2]
+    boxes_y2 = box[..., 3]
+
+    height, wight = image_shape[-2:]
+
+    boxes_x1 = boxes_x1.clamp(min=0, max=wight)
+    boxes_y1 = boxes_y1.clamp(min=0, max=height)
+    boxes_x2 = boxes_x2.clamp(min=0, max=wight)
+    boxes_y2 = boxes_y2.clamp(min=0, max=height)
+
+    boxes = torch.cat([boxes_x1, boxes_y1, boxes_x2, boxes_y2], dim=-1)
+
+    return boxes
+
+def get_iou(boxes1, boxes2):
+    r"""
+    :param boxes1:(N x 4)
+    :param boxes2:(M x 4)
+    :return:IOU matrix of shape (N, M)
+    """
+    # Area of Boxes (x2 - x1) * (y2 - y1)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+
+    # Get top left x1, y1
+    x_left = torch.max(boxes1[:, None, 0], boxes2[:, 0]) # (N x M)
+    y_top  = torch.max(boxes1[:, None, 1], boxes2[:, 1]) # (N x M)
+
+    # Get bottom right x2, y2
+    x_right = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+    y_bottom = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+
+    intersection = (x_right - x_left).clamp(min=0) * (y_bottom - y_top).clamp(min=0)
+    union = area1[:, None] + area2 - intersection
+
+    return  intersection / union # (N x M)
 
 class RPN(nn.Module):  # R-CNN RPN part: First Layer
     def __init__(self, in_channels=512):
@@ -79,6 +157,71 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
 
         return anchors
 
+    def filter_proposals(self, proposals, cls_score, image_shape):
+        # Pre NMS Filters
+        cls_score = cls_score.reshape(-1)
+        cls_score = torch.sigmoid(cls_score)
+        _, tpk_n_idx = cls_score.topk(10000)
+        cls_score = cls_score[tpk_n_idx]
+        proposals = proposals[tpk_n_idx]
+
+        # Clamp box to image boundary
+        proposals = clamp_box_to_image(proposals, image_shape)
+
+        # NMS based on objects
+        keep_mask = torch.zeros_like(cls_score, dtype=torch.bool)
+        keep_indices = torch.ops.torchvision.nms(proposals,
+                                                 cls_score,
+                                                 0.7)
+        post_nms_keep_indices = keep_indices[
+            cls_score[keep_indices].sort(descending=True)[1]
+        ]
+        # Post NMS topk filtering
+        proposals = proposals[post_nms_keep_indices[:2000]]
+        cls_score = cls_score[post_nms_keep_indices[:2000]]
+        return proposals, cls_score
+
+    def assign_target_to_anchor(self, anchors, gt_boxes):
+        # Get (gt_box, num_anchor) IOU matrix
+        iou_matrix = get_iou(gt_boxes, anchors)
+        best_match_iou, best_match_gt_index = iou_matrix.max(dim=0)
+
+        # This copy will be needed later to add low
+        # quality boxes
+        best_match_gt_idx_pre_threshold = best_match_gt_index.clone()
+        below_low_threshold = best_match_iou < 0.3
+        between_threshold = (best_match_iou >=0.3) & (best_match_iou < 0.7)
+        best_match_gt_index[below_low_threshold] = -1
+        best_match_gt_index[between_threshold] = -2
+
+        # Low quality boxes
+        best_anchor_iou_for_gt, _ = iou_matrix.max(dim=1)
+        gt_pre_pair_with_highest_iou = torch.where(iou_matrix == best_anchor_iou_for_gt[:, None])
+
+        # Get all the anchor index to update
+        pre_inds_to_update = gt_pre_pair_with_highest_iou[1]
+        best_match_gt_index[pre_inds_to_update] = best_match_gt_idx_pre_threshold[pre_inds_to_update]
+
+        # Best match index is either valid or -1(background) or -2(ignore)
+        match_gt_boxes = gt_boxes[best_match_gt_index.clamp(min=0)]
+
+        # Set all foreground anchor label as 1
+        labels = best_match_gt_index > 0
+        labels = labels.to(torch.float32)
+
+        # Set all background anchor label as 0
+        background_anchor = best_match_gt_index == -1
+        labels[background_anchor] = 0.0
+
+        # Set all ignore anchor label as -1
+        ignore_anchor = best_match_gt_index == -2
+        labels[ignore_anchor] = -1.0
+
+        # Later for classification we pick labels which have >=0
+        return labels, match_gt_boxes
+
+
+
     def forward(self, image, feat, target):
         # Call RPN Layer
         rpn_feat = nn.ReLU()(self.rpn_conv(feat))
@@ -105,6 +248,28 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         )
         box_transform_pred = box_transform_pred.permute(0, 3, 4, 1, 2)
         box_transform_pred = box_transform_pred.reshape(-1, 4)
-        # box_transform_pred -> (B*H_feat*W_feat*number_of_anchor_per_location)
+        # box_transform_pred -> (B*H_feat*W_feat*number_of_anchor_per_location, 4)
 
+        # Transform generate anchor to box_transform_pred
+        proposals = apply_regression_pred_to_anchor_or_proposals(
+            box_transform_pred.reshape(-1, 1, 4),
+            anchors
+        )
+        proposals = proposals.reshape(proposals.size(0), 4)
+        proposals, scores = self.filter_proposals(proposals, cls_score.detach(),
+                                                  image.shape)
 
+        rpn_output = {
+            'proposals': proposals,
+            'cls_score': cls_score,
+        }
+
+        if not self.training or target is None:
+            return rpn_output
+        else:
+            # in training
+            # Assign gt box and label for each anchor
+            labels_for_anchor, matched_gt_boxes = self.assign_target_to_anchor(
+                anchors, target['bbox'][0]
+            )
+            # TODO Video 31：50
