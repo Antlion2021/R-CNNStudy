@@ -83,5 +83,28 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         # Call RPN Layer
         rpn_feat = nn.ReLU()(self.rpn_conv(feat))
         cls_score = self.cls_layer(rpn_feat)
-        bbox_transform_pred = self.bbox_reg_layer(rpn_feat)
+        box_transform_pred = self.bbox_reg_layer(rpn_feat)
+
         # Generate Anchor
+        anchors = self.generaate_anchors(image, feat)
+
+        # ↓ Transform cls_score and box_transform_per -> anchor.shape
+        # cls_score -> (Batch, number of Anchors per location, H_feat, W_feat)
+        number_of_anchor_per_location = cls_score.size(1)
+        cls_score = cls_score.permute(0, 2, 3, 1)
+        cls_score = cls_score.reshape(-1, 1)
+        # cls_score -> (Batch*H_feat*W_feat*number_of_per_location, 1)
+
+        # box_transform_per -> (Batch, number_of_anchor_per_location*4, H_feat, W_feat)
+        box_transform_pred = box_transform_pred.view(
+            box_transform_pred.size(0),
+            number_of_anchor_per_location,
+            4,
+            rpn_feat.size[-2],
+            rpn_feat.size[-1]
+        )
+        box_transform_pred = box_transform_pred.permute(0, 3, 4, 1, 2)
+        box_transform_pred = box_transform_pred.reshape(-1, 4)
+        # box_transform_pred -> (B*H_feat*W_feat*number_of_anchor_per_location)
+
+
