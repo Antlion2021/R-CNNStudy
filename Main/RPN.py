@@ -129,8 +129,8 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         w_ratio = 1 / h_ratio
         # Get Box H and W
         #     [3x1] * [1x3] -> [3x3].view(-1) -> len[9]
-        ws = (w_ratio[:, None] * scale[:, None]).view(-1)
-        hs = (h_ratio[:, None] * scale[:, None]).view(-1)
+        ws = (w_ratio[:, None] * scale[None, :]).view(-1)
+        hs = (h_ratio[:, None] * scale[None, :]).view(-1)
 
         base_anchor = torch.stack([-ws, -hs, ws, hs], dim=1) / 2
         base_anchor = base_anchor.round()
