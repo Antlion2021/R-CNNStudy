@@ -44,6 +44,26 @@ def apply_regression_pred_to_anchor_or_proposals(
     # pred_box -> (num_of_anchor_or_proposals, num_classes, 4)
     return pred_box
 
+def sample_positive_negative(labels, positive_count, total_count):
+    # Sample positive and negative proposals
+    positive = torch.where(labels >= 1)[0]
+    negative = torch.where(labels == 0)[0]
+    num_pos = positive_count
+    num_pos = min(positive.numel(), num_pos)
+    num_neg = total_count - num_pos
+    num_neg = min(negative.numel(), num_neg)
+    perm_positive_idxs = torch.randperm(positive.numel(),
+                                        device=positive.device)[:num_pos]
+    perm_negative_idxs = torch.randperm(negative.numel(),
+                                        device=negative.device)[:num_neg]
+    pos_idxs = positive[perm_positive_idxs]
+    neg_idxs = negative[perm_negative_idxs]
+    sampled_pos_idx_mask = torch.zeros_like(labels, dtype=torch.bool)
+    sampled_neg_idx_mask = torch.zeros_like(labels, dtype=torch.bool)
+    sampled_pos_idx_mask[pos_idxs] = True
+    sampled_neg_idx_mask[neg_idxs] = True
+    return sampled_neg_idx_mask, sampled_pos_idx_mask
+
 def clamp_box_to_image(box, image_shape):
     boxes_x1 = box[..., 0]
     boxes_y1 = box[..., 1]
@@ -248,18 +268,18 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
     def forward(self, image, feat, target):
         # Call RPN Layer
         rpn_feat = nn.ReLU()(self.rpn_conv(feat))
-        cls_score = self.cls_layer(rpn_feat)
+        cls_scores = self.cls_layer(rpn_feat)
         box_transform_pred = self.bbox_reg_layer(rpn_feat)
 
         # Generate Anchor
         anchors = self.generaate_anchors(image, feat)
 
-        # ↓ Transform cls_score and box_transform_per -> anchor.shape
-        # cls_score -> (Batch, number of Anchors per location, H_feat, W_feat)
-        number_of_anchor_per_location = cls_score.size(1)
-        cls_score = cls_score.permute(0, 2, 3, 1)
-        cls_score = cls_score.reshape(-1, 1)
-        # cls_score -> (Batch*H_feat*W_feat*number_of_per_location, 1)
+        # ↓ Transform cls_scores and box_transform_per -> anchor.shape
+        # cls_scores -> (Batch, number of Anchors per location, H_feat, W_feat)
+        number_of_anchor_per_location = cls_scores.size(1)
+        cls_scores = cls_scores.permute(0, 2, 3, 1)
+        cls_scores = cls_scores.reshape(-1, 1)
+        # cls_scores -> (Batch*H_feat*W_feat*number_of_per_location, 1)
 
         # box_transform_per -> (Batch, number_of_anchor_per_location*4, H_feat, W_feat)
         box_transform_pred = box_transform_pred.view(
@@ -279,12 +299,12 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
             anchors
         )
         proposals = proposals.reshape(proposals.size(0), 4)
-        proposals, scores = self.filter_proposals(proposals, cls_score.detach(),
+        proposals, scores = self.filter_proposals(proposals, cls_scores.detach(),
                                                   image.shape)
 
         rpn_output = {
             'proposals': proposals,
-            'cls_score': cls_score,
+            'cls_scores': cls_scores,
         }
 
         if not self.training or target is None:
@@ -292,7 +312,7 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         else:
             # in training
             # Assign gt box and label for each anchor
-            labels_for_anchor, matched_gt_boxes_form_anchors = self.assign_target_to_anchor(
+            labels_for_anchors, matched_gt_boxes_form_anchors = self.assign_target_to_anchor(
                 anchors, target['bbox'][0]  # only one gt
             )
             # Based on gt assignment above, get regression target for anchors
@@ -300,3 +320,23 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
             # anchors -> (Number of anchors in image, 4)
 
             regression_targets = box_to_transform_target(matched_gt_boxes_form_anchors,anchors)
+            sampled_neg_idx_mask, sampled_pos_idx_mask = sample_positive_negative(labels_for_anchors,
+                                                                                  positive_count=128,
+                                                                                  total_count=256)
+            sampled_idxs = torch.where(sampled_pos_idx_mask | sampled_neg_idx_mask)[0]
+
+            localization_loss = (
+                    torch.nn.functional.smooth_l1_loss(
+                        box_transform_pred[sampled_pos_idx_mask],
+                        regression_targets[sampled_pos_idx_mask],
+                        beta=1 / 9,
+                        reduction="sum",
+                    )
+                    / (sampled_idxs.numel())
+            )
+            cls_loss = torch.nn.functional.binary_cross_entropy_with_logits(cls_scores[sampled_idxs].flatten(),
+                                                                            labels_for_anchors[sampled_idxs].flatten())
+
+            rpn_output['rpn_classification_loss'] = cls_loss
+            rpn_output['rpn_localization_loss'] = localization_loss
+            return rpn_output
