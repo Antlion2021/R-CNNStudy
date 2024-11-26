@@ -84,6 +84,29 @@ def get_iou(boxes1, boxes2):
 
     return  intersection / union # (N x M)
 
+def box_to_transform_target(ground_truth_boxes, anchors_or_proposals):
+    # Get Center_x,Center_y, W, H from anchors x1,y1,x2,y2
+    widths = anchors_or_proposals[:, 2] - anchors_or_proposals[:, 0]
+    heights = anchors_or_proposals[:, 3] - anchors_or_proposals[:, 1]
+    center_x = anchors_or_proposals[:, 0] + 0.5 * widths
+    center_y = anchors_or_proposals[:, 1] + 0.5 * heights
+
+    # Get Center_x,Center_y, W, H from gt_boxes x1,y1,x2,y2
+    gt_widths = ground_truth_boxes[:, 2] - ground_truth_boxes[:, 0]
+    gt_heights = ground_truth_boxes[:, 3] - ground_truth_boxes[:, 1]
+    gt_center_x = ground_truth_boxes[:, 0] + 0.5 * gt_widths
+    gt_center_y = ground_truth_boxes[:, 1] + 0.5 * gt_heights
+
+    target_dx = (gt_center_x - center_x) / widths
+    target_dy = (gt_center_y - center_y) / heights
+    target_dw = torch.log(gt_widths / widths)
+    target_dh = torch.log(gt_heights / heights)
+
+    regression_targets = torch.cat([target_dx, target_dy, target_dw, target_dh], dim=1)
+
+    return regression_targets
+
+
 class RPN(nn.Module):  # R-CNN RPN part: First Layer
     def __init__(self, in_channels=512):
         super(RPN, self).__init__()
@@ -190,7 +213,7 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         # quality boxes
         best_match_gt_idx_pre_threshold = best_match_gt_index.clone()
         below_low_threshold = best_match_iou < 0.3
-        between_threshold = (best_match_iou >=0.3) & (best_match_iou < 0.7)
+        between_threshold = (best_match_iou >= 0.3) & (best_match_iou < 0.7)
         best_match_gt_index[below_low_threshold] = -1
         best_match_gt_index[between_threshold] = -2
 
@@ -269,7 +292,11 @@ class RPN(nn.Module):  # R-CNN RPN part: First Layer
         else:
             # in training
             # Assign gt box and label for each anchor
-            labels_for_anchor, matched_gt_boxes = self.assign_target_to_anchor(
-                anchors, target['bbox'][0]
+            labels_for_anchor, matched_gt_boxes_form_anchors = self.assign_target_to_anchor(
+                anchors, target['bbox'][0]  # only one gt
             )
-            # TODO Video 31：50
+            # Based on gt assignment above, get regression target for anchors
+            # matches_gt_box_form_anchor ->(Number of anchor in image, 4)
+            # anchors -> (Number of anchors in image, 4)
+
+            regression_targets = box_to_transform_target(matched_gt_boxes_form_anchors,anchors)
