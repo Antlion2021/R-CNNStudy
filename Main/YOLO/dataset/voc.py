@@ -207,7 +207,7 @@ class VOCDataset(Dataset):
         # For training, we use yolo_targets(xoffset, yoffset, sqrt(w), sqrt(h))
         # For evaluation we use bboxes_tensor (x1, y1, x2, y2)
         # Below we normalize bboxes tensor to be between 0-1
-        # as thats what evaluation script expects so (x1/w, y1/h, x2/w, y2/h)
+        # as that what evaluation script expects so (x1/w, y1/h, x2/w, y2/h)
         if len(bboxes) > 0:
             bboxes_tensor /= torch.Tensor([[w, h, w, h]]).expand_as(bboxes_tensor)
         targets = {
