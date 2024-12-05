@@ -127,7 +127,7 @@ def box_to_transform_target(ground_truth_boxes, anchors_or_proposals):
     return regression_targets
 
 
-class RPN(nn.Module):  # R-CNN RPN part: First Layer
+class RPN(nn.Module):  # Pytorch_study RPN part: First Layer
     def __init__(self, in_channels=512):
         super(RPN, self).__init__()
         self.scales = [128, 256, 512]

@@ -4,9 +4,9 @@ import os
 import yaml
 import random
 from tqdm import tqdm
-from models.yolo import YOLOV1
-from dataset.voc import VOCDataset
-from utils.visualization_utils import *
+from Pytorch_study.Main.YOLOV1.models.yolo import YOLOV1
+from Pytorch_study.Main.YOLOV1.dataset.voc import VOCDataset
+from Pytorch_study.Main.YOLOV1.utils.visualization_utils import *
 from torch.utils.data.dataloader import DataLoader
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
