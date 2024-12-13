@@ -4,6 +4,7 @@ import torchvision
 
 class YOLOV1(nn.Module):
     r"""
+    2024/11/21
     Model with three components:
     1. Backbone of resnet34 pretrained on 224x224 images from Imagenet
     2. 4 Conv,Batchnorm,LeakyReLU Layers for Yolo Detection Head

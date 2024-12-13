@@ -4,12 +4,12 @@ import os
 import numpy as np
 import yaml
 import random
-from Pytorch_study.Main.YOLOV1.models.yolo import YOLOV1
+from models.yolo import YOLOV1
 from tqdm import tqdm
-from Pytorch_study.Main.YOLOV1.dataset.voc import VOCDataset
+from dataset.voc import VOCDataset
 from torch.utils.data.dataloader import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
-from Pytorch_study.Main.YOLOV1.loss.yolov1_loss import YOLOV1Loss
+from loss.yolov1_loss import YOLOV1Loss
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
